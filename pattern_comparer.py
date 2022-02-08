@@ -12,6 +12,11 @@ import matplotlib.pyplot as plt
 import cmocean
 from numpy import log10
 from math import ceil, floor
+import numpy as np
+from copy import deepcopy
+
+def sum_peaks(peaks):
+    print(sum([len(peaks[rt]) for rt in peaks]))
 
 def obtain_peaks_from_file(file):
     #Extract the peaks from the file
@@ -26,23 +31,192 @@ def obtain_peaks_from_file(file):
             mass = float(mass_dat.split('\t')[0])
             intensity = float(mass_dat.split('\t')[1].split(': ')[1])
             formulas = [formula.replace('\n', '') for formula in mass_dat.split('\t\t')[1:]]
-            peaks_from_file[time].append([mass, intensity, formulas]) 
+            peaks_from_file[time].append([mass, intensity, formulas])
     return peaks_from_file
 
-def plot_results_in_2D(unique_peaks, plot_filename, time_range, mass_range, overwrite):
+def parse_files(files, args, sample):
+    # Pare the input files and obtain the peaks. Cluster them if necessary
+    peaks = defaultdict(list)
+    for file in files:
+        peaks[file] = obtain_peaks_from_file(file)
+        if len(peaks[file]) == 0:
+            sys.stdout.write(f"Did not find any peaks in {file}.\n")
+    files = [file for file in files if len(peaks[file]) > 0 ]
+
+    peaks_in_all_files = peaks[files[0]]
+
+    # If there are more files, make sure the peaks are in all the sample files
+    for file_iterator, file in enumerate(files):
+        if file_iterator == 0:
+            sys.stdout.write(f"Found {len(files)} {''.join(['input' if sample else 'reference'])} files:\n\t" + '\n\t'.join([file for file in files]) + '\n')
+
+        for reference_file in files[file_iterator+1:]:
+            sys.stdout.write(f"Finding {''.join(['unique' if sample else 'shared'])} peaks between {os.path.basename(file)} and {os.path.basename(reference_file)}.\n")
+            if file_iterator == 0:
+                unique_peaks, peaks_in_all_files = compare_peaks(peaks[file], peaks[reference_file], args, sample)
+            else:
+                unique_peaks, peaks_in_all_files = compare_peaks(peaks_in_all_files, peaks[reference_file], args, sample)
+            if not sample:
+                for rt in unique_peaks:
+                    peaks_in_all_files[rt].extend(unique_peaks[rt])
+    return peaks_in_all_files
+
+
+def compare_input_mass_to_reference_masses(input_mass, reference_masses, args, mode):
+    # Small function to see if an input mass is present in a list of reference masses
+    result = [None, None]
+    for reference_mass in reference_masses:
+        if abs(input_mass[0]-reference_mass[0]) < args.mass_tolerance*input_mass[0]:
+            if mode == 'compare':
+                result[0] = input_mass
+            else:
+                result[0] = [round((input_mass[0] + reference_mass[0])/2, 4), round((input_mass[1] + reference_mass[1])/2, 1), input_mass[2]]
+                break
+            return result
+
+    # If no matches are found, the peak is unique
+    if input_mass[1] > args.min_intensity:
+        result[1] = input_mass
+    return result
+
+
+def compare_peaks(input_peaks, reference_peaks, args, mode):
+    # Compare the peaks and return a dictionary of unique and mutual peaks
+    # For the mutual peaks, the average of the masses, retention times and intensities is reported
+
+    unique_peaks = defaultdict(list)
+    mutual_peaks = defaultdict(list)
+
+    num_reference_peaks = len(reference_peaks)
+    rt_ref_peaks = [rt for rt in reference_peaks]
+
+    ref_iterator = 0
+    total_input_peaks = len(input_peaks)
+    for rt_index, rt in enumerate(input_peaks):
+        #if rt > 6.46:
+        #     break
+        # Check for every elution time...
+        if mode == 'compare':
+            sys.stdout.write(f"\rProgress: {round(rt_index/total_input_peaks*100, 2)}%")
+        # Check if the peaks at all elution times in the sample match to a reference
+        if ref_iterator < len(reference_peaks)-1:
+            # If the reference iterator for the reference is still much earlier, first catch up
+            while rt_ref_peaks[ref_iterator]-rt < -1*args.time_tolerance and ref_iterator < len(rt_ref_peaks)-1:
+                ref_iterator += 1
+
+        if rt_ref_peaks[ref_iterator]-rt > args.time_tolerance:
+            unique_peaks[rt] = input_peaks[rt]
+            continue
+        if rt_ref_peaks[-1] < rt:
+            unique_peaks[rt] = input_peaks[rt]
+            continue
+
+        elif abs(rt_ref_peaks[ref_iterator]-rt) <= args.time_tolerance and ref_iterator < len(rt_ref_peaks):
+           input_masses = input_peaks[rt]
+           # If the rt range of interest is in the reference, look in the neighboring rts for all masses
+           reference_masses = reference_peaks[rt_ref_peaks[ref_iterator]]
+           ref_mass_iterator = ref_iterator
+           while rt_ref_peaks[ref_mass_iterator]-rt < 1*args.time_tolerance and ref_mass_iterator < len(rt_ref_peaks)-1:
+               reference_masses.extend(reference_peaks[rt_ref_peaks[ref_mass_iterator]])
+               ref_mass_iterator += 1
+           # And then compare each input_mass to the masses in the surrounding reference spectra
+           for input_mass in input_masses:
+               mutual_peak, unique_peak = compare_input_mass_to_reference_masses(input_mass, reference_masses, args, mode)
+               if mutual_peak:
+                   mutual_peaks[round(rt, 2)].append(mutual_peak)
+               elif unique_peak:
+                   unique_peaks[round(rt, 2)].append(unique_peak)
+
+    sys.stdout.write('\n')
+    return unique_peaks, mutual_peaks
+
+def filter_peaks_for_identical_masses(input_peaks, args):
+    # Combine hits that have masses within the mass tolerance
+
+    # First filter each spectrum for identical peaks
+    # This already slashes the number of peaks to process by 10 for Andrei
+    filtered_peaks = defaultdict(list)
+    for rt in input_peaks:
+        peaks = sorted(input_peaks[rt], key=lambda peak: peak[0])
+        peak_mass, peak_intensity, peak_formula = [0, 0, '']
+        start_mass = 0
+        peak_iterator = 0
+        while peak_iterator < len(peaks)-1:
+            mass, intensity, formula = peaks[peak_iterator]
+            if mass-start_mass <= 2*args.mass_tolerance*start_mass and intensity > peak_intensity:
+                peak_mass = mass
+                peak_intensity = intensity
+                peak_formula = formula
+            if mass-start_mass > 2*args.mass_tolerance*start_mass:
+                if peak_iterator > 0:
+                    filtered_peaks[rt].append([peak_mass, peak_intensity, peak_formula])
+                start_mass = mass
+                peak_mass = mass
+                peak_intensity = intensity
+                peak_formula = formula
+            peak_iterator += 1
+
+    rts = [rt for rt in filtered_peaks]
+    # Make a copy
+    centered_peaks = deepcopy(filtered_peaks)
+
+    for rt_index, rt in enumerate(filtered_peaks):
+        peaks = filtered_peaks[rt]
+        for mass, intensity, formula in peaks:
+            # Check for each peak in the neighborhing retention times
+            rt_iterator = 1
+            while rt_index+rt_iterator < len(rts):
+                next_rt = rts[rt_index+rt_iterator]
+                if next_rt-rt > args.time_tolerance:
+                    break
+                next_peaks = filtered_peaks[next_rt]
+                for next_mass, next_intensity, next_formula in next_peaks:
+                    if next_mass - mass < -1*args.mass_tolerance*mass:
+                        continue
+                    elif next_mass - mass > args.mass_tolerance*mass:
+                        break # or remove from dict?
+                    elif intensity >= next_intensity:
+                        try:
+                            centered_peaks[next_rt].remove([next_mass, next_intensity, next_formula])
+                            #print(f'Removed {next_rt} - {[next_mass, next_intensity, next_formula]} because {rt}')
+                        except ValueError:
+                            pass
+                            #print(f"{next_rt}: {[next_mass, next_intensity, next_formula]} already removed?")
+                    elif next_intensity > intensity:
+                        try:
+                            #print(f'Removed {rt} - {[mass, intensity, formula]} because {next_rt}')
+                            centered_peaks[rt].remove([mass, intensity, formula])
+                        except ValueError:
+                            pass
+                            #print(f"{rt}: {[mass, intensity, formula]} already removed?")
+                rt_iterator += 1
+
+    return centered_peaks
+
+
+def plot_results_in_2D(unique_peaks, plot_filename, time_range, mass_range, args):
     # Plot the analyzed spectra in a single graph
     plot_list = list()
     for rt in unique_peaks:
         spectrum = unique_peaks[rt]
-        for peak in spectrum[1:]:
+        for peak in spectrum:
             plot_list.append([peak[0], rt, log10(peak[1])])
     plot_list = pd.DataFrame(plot_list, columns=['mass', 'time', 'intensity'])
     plot_list = plot_list.sort_values(by='intensity', ascending='True', ignore_index=True)
 
+    if os.path.isdir(args.input):
+        sample_name = os.path.abspath(args.input).split('\\')[-1]
+    else:
+        sample_name = os.path.basename(args.input)
+    if os.path.isdir(args.reference):
+        reference_name = os.path.abspath(args.reference).split('\\')[-1]
+    else:
+        reference_name = os.path.basename(args.reference)
+
     # Define the plot
     zrange = [power for power in range(floor(min(plot_list['intensity'])), ceil(max(plot_list['intensity'])))]
-    plt.figure(figsize=(12, 12))
-    plt.title('Unique masses\nInput: ' + '\nRef: '.join(os.path.basename(plot_filename).split('_ref_')), fontsize=16)
+    plt.figure(figsize=(12, 10))
+    plt.title(f"Unique masses\nInput: {sample_name}    Ref: {reference_name}", fontsize=16)
     plot = plt.scatter(plot_list['time'], plot_list['mass'], c=plot_list['intensity'],
                        marker='.',
                        cmap=cmocean.cm.rain,
@@ -61,16 +235,36 @@ def plot_results_in_2D(unique_peaks, plot_filename, time_range, mass_range, over
 
     # Save the plot
     plot_filename = os.path.splitext(plot_filename)[0]
-    sys.stdout.write(str(overwrite))
-    if not overwrite and any([os.path.isfile(plot_filename+'.svg'), os.path.isfile(plot_filename+'.png')]):
+    if not args.overwrite and any([os.path.isfile(plot_filename+'.svg'), os.path.isfile(plot_filename+'.png')]):
         suffix = 1
         while any([os.path.isfile(plot_filename+'_'+str(suffix)+'.svg'), os.path.isfile(plot_filename+'_'+str(suffix)+'.png')]):
             suffix += 1
         plot_filename = f"{plot_filename}_{suffix}"
     plt.savefig(plot_filename+'.svg', transparent=True, dpi=300)
     plt.savefig(plot_filename+'.png', transparent=True, dpi=300)
-    sys.stdout.write(f"Saved plot:\n\t{plot_filename}.svg\n\t{plot_filename}.svg\n")
+    sys.stdout.write(f"Saved plot:\n\t{plot_filename}.png\n\t{plot_filename}.svg\n")
 
+def clean_formula(formula):
+    # Remove the parts in the chemical formula that have coefficient 0 and clean
+    # the string
+    elements = formula.split('_')
+    clean_formula = list()
+    chemical_groups = ['C2H4','C2H2','CH2','NH3', 'O']
+    for element in elements:
+        # Check if the last value is 0, not 10/20.. and not a custom element
+        if element[-1] == '0' and not ':' in element:
+            if element[-2].isdigit() and not any([alkyl in element[-2-len(alkyl):-1] for alkyl in chemical_groups]):
+                pass
+            else:
+                continue
+        else:
+            clean_formula.append(element)
+    customs = [element for element in clean_formula if ':' in element]
+    adducts = [element for element in clean_formula if '+' in element]
+    chemical_groups = [element for element in clean_formula if any([moiety in element for moiety in chemical_groups])]
+    remainder = sorted([element for element in clean_formula if not any([element in adducts, element in customs, element in chemical_groups])])
+    clean_formula = customs + remainder + chemical_groups + adducts
+    return '_'.join(clean_formula)
 
 
 def main():
@@ -84,50 +278,55 @@ def main():
     parser.add_argument('-plot_mass_range',help='Mass range to use for plotting', default='0-1000', type=str)
     parser.add_argument('-min_intensity', help='Minimum intensity for unique plots to be reported. Default=1e4', type=float, default=1e4)
     parser.add_argument('-overwrite', help='If overwrite is True, the data saved from previous runs will be overwritten.', action='store_true')
-
+    parser.add_argument('-output_dir', help='Optional other output directory.', type=str, default=None)
     args = parser.parse_args()
-    args.overwrite = bool(args.overwrite)
-    input_peaks = obtain_peaks_from_file(args.input)
-    reference_peaks = obtain_peaks_from_file(args.reference)
+
+    if os.path.isdir(args.input):
+        input_files = [os.path.join(args.input, file) for file in os.listdir(args.input) if '_analyzed.txt' in file.lower()]
+    else:
+        input_files = [os.path.join(os.path.dirname(args.input), file) for file in os.listdir(os.path.dirname(args.input)) if all(['_analyzed.txt' in file.lower(), os.path.basename(args.input) in file])]
+    if os.path.isdir(args.reference):
+        reference_files = [os.path.join(args.reference, file) for file in os.listdir(args.reference) if '_analyzed.txt' in file.lower()]
+    else:
+        reference_files = [os.path.join(os.path.dirname(args.reference), file) for file in os.listdir(os.path.dirname(args.reference)) if all(['_analyzed.txt' in file.lower(), os.path.basename(args.reference) in file])]
+
+    sys.stdout.write(f"Obtaining peaks from analyzed files.\n{''.join(['=' for i in range(20)])}\n")
+    input_peaks = parse_files(input_files, args, sample=True)
+    reference_peaks = parse_files(reference_files, args, sample=False)
+
+    if len(input_files) > 1:
+        input_peaks = filter_peaks_for_identical_masses(input_peaks, args)
+    if len(reference_files)>1:
+        reference_peaks = filter_peaks_for_identical_masses(reference_peaks, args)
+
+    sys.stdout.write(f"Comparing peaks.\n{''.join(['=' for i in range(20)])}\n")
+    unique_peaks, difference_peaks = compare_peaks(input_peaks, reference_peaks, args, 'compare')
+
+    if args.output_dir is not None and not os.path.isdir(args.output_dir):
+        sys.stdout.write(f"ERROR: Could not find output directory {args.output_dir}. Saving in {os.path.dirname(args.input)} without overwriting.\n")
+        args.output_dir = os.path.dirname(args.input)
+        args.overwrite = False
+    if args.output_dir is None:
+        args.output_dir = os.path.dirname(args.input)
     
-    unique_peaks = defaultdict(list)
-    difference_peaks = defaultdict(list)
-
-    num_reference_peaks = len(reference_peaks)
-    elution_reference_peaks = [elution for elution in reference_peaks]
-    ref_iterator = 0
-
-    for elution_time in input_peaks:
-        # Check if the peaks at all elution times in the sample match to a reference
-        while elution_reference_peaks[ref_iterator]-elution_time < -1*args.time_tolerance:
-            ref_iterator += 1
-        if elution_reference_peaks[ref_iterator]-elution_time > args.time_tolerance:
-            unique_peaks[elution_time] = input_peaks[elution_time]
-            continue
-        elif abs(elution_reference_peaks[ref_iterator]-elution_time) < args.time_tolerance:
-           input_masses = input_peaks[elution_time]
-           reference_masses = [mass for mass in reference_peaks[elution_reference_peaks[ref_iterator]]]
-           for input_mass in input_masses:
-               for reference_mass in reference_masses:
-                   if (input_mass[0]-reference_mass[0]) < args.mass_tolerance*input_mass[0]:
-                       difference_peaks[elution_time].append([input_mass[0], input_mass[1]-reference_mass[1], input_mass[2]])
-               if not any([abs(input_mass[0]-reference_mass[0])<args.mass_tolerance*input_mass[0] for reference_mass in reference_masses]) and input_mass[1] > args.min_intensity:
-                   unique_peaks[elution_time].append(input_mass)
-
-    output_file = f"{os.path.splitext(args.input)[0]}_ref_{os.path.splitext(os.path.basename(args.reference))[0]}.txt"
+    output_file = f"{args.output_dir}/{os.path.splitext(os.path.basename(args.input))[0]}_ref_{os.path.splitext(os.path.basename(args.reference))[0]}.txt"
     with open(output_file, 'w') as file:
         file.write(f"Input file: {args.input}\nReference file: {args.reference}\n\nFound {len(unique_peaks)} unique peaks.\n\n")
+        file.write(f"Time tolerance: {args.time_tolerance}\nMass tolerance: {args.mass_tolerance*1e6} ppm\n\n")
+        file.write(''.join(['=' for _ in range(20)])+ '\n')
         for rt in unique_peaks:
+            if unique_peaks[rt] == []:
+                continue
             file.write(f"Unique peak at {rt}:\n")
             for mass in unique_peaks[rt]:
                 file.write(f"\tMass:{mass[0]}\tIntensity: {mass[1]}\n\t\t")
                 file.write('\n\t\t'.join([formula for formula in mass[2]])+'\n')
     sys.stdout.write(f"Saved unique peaks to {output_file}.\n")
-    
+
     time_range = [float(time) for time in args.plot_time_range.split('-')]
     mass_range = [float(mass) for mass in args.plot_mass_range.split('-')]
-    plot_filename = f"{os.path.splitext(args.input)[0]}_ref_{os.path.splitext(os.path.basename(args.reference))[0]}.png"
-    plot_results_in_2D(unique_peaks, plot_filename, time_range, mass_range, args.overwrite)        
-        
+    plot_filename = f"{args.output_dir}/{os.path.splitext(os.path.basename(args.input))[0]}_ref_{os.path.splitext(os.path.basename(args.reference))[0]}.png"
+    plot_results_in_2D(unique_peaks, plot_filename, time_range, mass_range, args)
+
 if __name__=='__main__':
     main()
