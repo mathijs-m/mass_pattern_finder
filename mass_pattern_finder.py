@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Created on Mon Dec 20 10:17:37 2021
-Script to parse through an MS file and find the chlorinated masses
-@author: mmabesoone
+Parse through mzXML files to find specific mass patterns that match specific
+chemical formulas.
+
+(C) Mathijs Mabesoone, ETH Zurich
+February 2022
 """
 from pyteomics import mzxml
 import os
@@ -193,7 +195,7 @@ def plot_results_in_2D(analyzed_spectra, output_file, time_range, mass_range, ov
 
 def clean_formula(formula):
     # Remove the parts in the chemical formula that have coefficient 0 and clean
-    # the string
+    # the formula
     elements = formula.split('_')
     clean_formula = list()
     chemical_groups = ['C2H4','C2H2','CH2','NH3', 'O']
@@ -225,10 +227,10 @@ def main():
     parser.add_argument('-time_range', help='Set a custom time range to analyze in the mass spec data. Example: for 3-10 minutes, enter 3-10.', type=str, default='0-1000')
     parser.add_argument('-mass_range', help='Set a custom mass range to analyze in the mass spec data. Example: for m/z 200-600 , enter 200-600.', type=str, default='0-1000')
     parser.add_argument('-output_folder', help='Specify a specific output folder. If not specified, the output will be in the same folder as the mzxml files.', type=str)
-    parser.add_argument('-output_prefix', help='Prefix to the output files', default='')
+    parser.add_argument('-output_prefix', help='Prefix to the output files', default=None, type=str)
     parser.add_argument('-overwrite', help='If overwrite is True, the data saved from previous runs will be overwritten.',  action='store_true')
     parser.add_argument('-full_range', help='If full_range is True, the output plot will span the entire time and mass range. Useful for comparing samples, but less ideal to check a single file. Default: False',  action='store_true')
-    parser.add_argument('-plot_time_range',help='NEEDS TO BE IMPLEMENTED')
+    parser.add_argument('-plot_time_range',help='Time range to use for plotting', default='0-30', type=str)
     parser.add_argument('-plot_mass_range',help='Mass range to use for plotting', default='0-1000', type=str)
     parser.add_argument('-intensity_diff', help='Min and max intensity ratios of isotope peaks to be detected. Default is for chlorination: "0.25-1".', default = '0.25-1', type=str)
     
@@ -236,7 +238,6 @@ def main():
 
     # Print boundary
     sys.stdout.write(f"{''.join(['=' for _ in range(20)])}\n")
-
     # Check if the input is a directory or file and make a file list
     if os.path.isdir(args.input) and not os.path.isfile(args.input):
         files = [os.path.join(args.input, file) for file in os.listdir(args.input) if '.mzxml' in file.lower()]
@@ -280,15 +281,12 @@ def main():
         analyzed_spectra = [spectrum for spectrum in analyzed_spectra if spectrum is not None]
         sys.stdout.write(f"\tFound {sum([len(spectrum[1]) for spectrum in analyzed_spectra if spectrum != None])} masses matching the pattern in {file}\n")
 
-        # Regroup the peaks in the rounded off retention time bins coming from analyze_mass_spec
-
         if args.output_folder is not None:
             if not os.path.isdir(args.output_folder):
                 sys.stdout.write(f"WARNING: {args.output_folder} is not a valid folder path. Saving files in {os.path.dirname(file)} instead.\n")
-                file = os.path.join(os.path.dirname(file), args.output_prefix + os.path.basename(file))
             else:
-                file = os.path.join(args.output_folder, args.output_prefix + os.path.basename(file))
-        file = append_suffix_to_file(file, args.overwrite)
+                file = os.path.join(args.output_folder, os.path.basename(file))
+        file = append_suffix_to_file(os.path.join(os.path.dirname(file), args.output_prefix + os.path.basename(file)), args.overwrite)
         with open(os.path.splitext(file)[0]+'_analyzed.txt', 'w') as output_file:
             output_file.write(f"Checking for compounds with formulas in range {args.elements}.\nChecking in time range {time_range} and mass range {mass_range}.\n\n")
             output_file.write(f"Mass range; {mass_range}\nTime range: {time_range}\nMass difference: {args.mass_difference}\nIntensity ratios: {args.intensity_diff}\n\n")

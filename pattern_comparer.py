@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 Script to compare output of the mass_pattern_finder with a reference file
-@author: mmabesoone
+
+(C) Mathijs Mabesoone, ETH Zurich
+February 2022
 """
 from collections import defaultdict
 import sys
@@ -134,7 +136,6 @@ def filter_peaks_for_identical_masses(input_peaks, args):
     # Combine hits that have masses within the mass tolerance
 
     # First filter each spectrum for identical peaks
-    # This already slashes the number of peaks to process by 10 for Andrei
     filtered_peaks = defaultdict(list)
     for rt in input_peaks:
         peaks = sorted(input_peaks[rt], key=lambda peak: peak[0])
@@ -157,6 +158,7 @@ def filter_peaks_for_identical_masses(input_peaks, args):
             peak_iterator += 1
 
     rts = [rt for rt in filtered_peaks]
+
     # Make a copy
     centered_peaks = deepcopy(filtered_peaks)
 
@@ -174,21 +176,17 @@ def filter_peaks_for_identical_masses(input_peaks, args):
                     if next_mass - mass < -1*args.mass_tolerance*mass:
                         continue
                     elif next_mass - mass > args.mass_tolerance*mass:
-                        break # or remove from dict?
+                        break
                     elif intensity >= next_intensity:
                         try:
                             centered_peaks[next_rt].remove([next_mass, next_intensity, next_formula])
-                            #print(f'Removed {next_rt} - {[next_mass, next_intensity, next_formula]} because {rt}')
                         except ValueError:
                             pass
-                            #print(f"{next_rt}: {[next_mass, next_intensity, next_formula]} already removed?")
                     elif next_intensity > intensity:
                         try:
-                            #print(f'Removed {rt} - {[mass, intensity, formula]} because {next_rt}')
                             centered_peaks[rt].remove([mass, intensity, formula])
                         except ValueError:
                             pass
-                            #print(f"{rt}: {[mass, intensity, formula]} already removed?")
                 rt_iterator += 1
 
     return centered_peaks
@@ -308,7 +306,7 @@ def main():
         args.overwrite = False
     if args.output_dir is None:
         args.output_dir = os.path.dirname(args.input)
-    
+
     output_file = f"{args.output_dir}/{os.path.splitext(os.path.basename(args.input))[0]}_ref_{os.path.splitext(os.path.basename(args.reference))[0]}.txt"
     with open(output_file, 'w') as file:
         file.write(f"Input file: {args.input}\nReference file: {args.reference}\n\nFound {len(unique_peaks)} unique peaks.\n\n")
